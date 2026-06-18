@@ -1,0 +1,169 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"warden/internal/warden"
+)
+
+var version = "dev"
+
+var defaultIssuePatterns = []string{
+	`(?i)\[([A-Z][A-Z0-9]+[-_ /]\d+)\]`,
+	`(?i)\(([A-Z][A-Z0-9]+[-_ /]\d+)\)`,
+	`(?i)#([A-Z][A-Z0-9]+[-_ /]\d+)\b`,
+	`(?i)\b(?:jira|issue|ticket|task|ref|refs|related|close|closes|fix|fixes)[:=#\s]+([A-Z][A-Z0-9]+[-_ /]\d+)\b`,
+	`(?i)\b(?:feature|feat|bugfix|fix|hotfix|release|task|chore|refactor|test|tests|docs|ci|dev|story|epic)[/_-]+([A-Z][A-Z0-9]+[-_ /]\d+)(?:[-_/][\w-]+)?`,
+	`(?i)\b([A-Z][A-Z0-9]+[-_]\d+)\b`,
+}
+
+func main() {
+	cmd := newRootCommand(context.Background())
+	cmd.SetArgs(normalizeLegacyFlags(os.Args[1:]))
+
+	if err := cmd.Execute(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func newRootCommand(ctx context.Context) *cobra.Command {
+	var cfg warden.Config
+	var from string
+	var to string
+	var showVersion bool
+	issuePatterns := issuePatternFlag(defaultIssuePatterns)
+
+	cmd := &cobra.Command{
+		Use:           "jirawarden",
+		Short:         "Создает Jira worklog по GitLab merge requests",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if showVersion {
+				fmt.Fprintln(os.Stdout, version)
+				return nil
+			}
+
+			return run(ctx, cfg, issuePatterns.values(), from, to)
+		},
+	}
+
+	flags := cmd.Flags()
+	flags.StringVar(&cfg.GitLabURL, "gitlab-url", getenv("GITLAB_URL", ""), "базовый URL GitLab")
+	flags.StringVar(&cfg.GitLabToken, "gitlab-token", getenv("GITLAB_TOKEN", ""), "private token GitLab")
+	flags.StringVar(&cfg.GitLabUsername, "gitlab-user", getenv("GITLAB_USER", ""), "имя пользователя GitLab")
+	flags.StringVar(&cfg.GitLabMRState, "gitlab-mr-state", getenv("GITLAB_MR_STATE", "all"), "состояние GitLab MR: all, opened, closed, locked или merged")
+	flags.StringVar(&cfg.JiraURL, "jira-url", getenv("JIRA_URL", ""), "базовый URL Jira")
+	flags.StringVar(&cfg.JiraEmail, "jira-email", getenv("JIRA_EMAIL", ""), "email пользователя Jira")
+	flags.StringVar(&cfg.JiraToken, "jira-token", getenv("JIRA_TOKEN", ""), "API token Jira")
+	flags.StringVar(&cfg.JiraAuth, "jira-auth", getenv("JIRA_AUTH", "auto"), "режим авторизации Jira: auto, basic или bearer")
+	flags.StringVar(&cfg.JiraSprintField, "jira-sprint-field", getenv("JIRA_SPRINT_FIELD", "auto"), "custom field спринта Jira или auto")
+	flags.StringVar(&cfg.JiraAssignee, "jira-assignee", getenv("JIRA_ASSIGNEE", getenv("JIRA_EMAIL", "")), "ожидаемый исполнитель Jira: accountId, name, email или display name")
+	flags.Var(&issuePatterns, "issue-pattern", "дополнительная regexp с одной группой Jira key; можно повторять")
+	flags.StringVar(&cfg.CommentPrefix, "comment-prefix", "GitLab MR", "префикс комментария Jira worklog")
+	flags.Float64Var(&cfg.HoursPerDay, "hours-per-day", 8, "сколько часов распределять на рабочий день")
+	flags.Float64Var(&cfg.MaxHoursPerDay, "max-hours-per-day", 8, "максимальный суммарный Jira worklog за день")
+	flags.BoolVar(&cfg.RequireSprint, "require-sprint", true, "пропускать Jira задачи вне активного спринта")
+	flags.BoolVar(&cfg.AssumeYes, "yes", false, "создавать Jira worklog без интерактивного подтверждения")
+	flags.BoolVar(&cfg.DryRun, "dry-run", true, "показать worklog без отправки в Jira")
+	flags.StringVar(&from, "from", "", "дата начала, YYYY-MM-DD")
+	flags.StringVar(&to, "to", "", "дата окончания, YYYY-MM-DD")
+	flags.BoolVar(&showVersion, "version", false, "вывести версию и выйти")
+
+	return cmd
+}
+
+func run(
+	ctx context.Context,
+	cfg warden.Config,
+	issuePatterns []string,
+	from string,
+	to string,
+) error {
+	if from == "" || to == "" {
+		return fmt.Errorf("нужно указать -from и -to")
+	}
+
+	startDate, err := time.Parse(time.DateOnly, from)
+	if err != nil {
+		return fmt.Errorf("не удалось разобрать -from: %w", err)
+	}
+
+	endDate, err := time.Parse(time.DateOnly, to)
+	if err != nil {
+		return fmt.Errorf("не удалось разобрать -to: %w", err)
+	}
+
+	cfg.IssuePatterns = issuePatterns
+	cfg.Period = warden.Period{
+		From: startDate,
+		To:   endDate,
+	}
+
+	return warden.Run(ctx, cfg, os.Stdout, os.Stdin)
+}
+
+type issuePatternFlag []string
+
+func (flag *issuePatternFlag) String() string {
+	return strings.Join(*flag, ", ")
+}
+
+func (flag *issuePatternFlag) Set(value string) error {
+	if value == "" {
+		return fmt.Errorf("issue pattern не может быть пустым")
+	}
+
+	*flag = append(*flag, value)
+	return nil
+}
+
+func (flag *issuePatternFlag) Type() string {
+	return "regexp"
+}
+
+func (flag issuePatternFlag) values() []string {
+	patterns := make([]string, 0, len(flag))
+	for _, pattern := range flag {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		patterns = append(patterns, pattern)
+	}
+
+	return patterns
+}
+
+func getenv(key string, fallback string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	return value
+}
+
+func normalizeLegacyFlags(args []string) []string {
+	normalized := make([]string, 0, len(args))
+	for _, arg := range args {
+		isLongSingleDash := strings.HasPrefix(arg, "-") &&
+			!strings.HasPrefix(arg, "--") &&
+			len(arg) > 2
+		if isLongSingleDash {
+			normalized = append(normalized, "-"+arg)
+			continue
+		}
+
+		normalized = append(normalized, arg)
+	}
+
+	return normalized
+}
