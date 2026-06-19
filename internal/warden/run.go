@@ -61,7 +61,7 @@ func Run(ctx context.Context, cfg Config, out io.Writer, in io.Reader) error {
 			return err
 		}
 		if len(worklogs) == 0 {
-			_, _ = fmt.Fprintln(out, "после фильтра спринта нет worklog для создания")
+			_, _ = fmt.Fprintln(out, "после фильтрации по спринту нет worklog для создания")
 			return nil
 		}
 	}
@@ -69,12 +69,13 @@ func Run(ctx context.Context, cfg Config, out io.Writer, in io.Reader) error {
 	for _, worklog := range worklogs {
 		_, _ = fmt.Fprintf(
 			out,
-			"%s %s %.2fч комментарий: %s\n",
+			"StartedDate: %s IssueKey: %s TimeSpent: %.2fч Comment: %s\n",
 			worklog.StartedDate,
 			worklog.IssueKey,
 			float64(worklog.TimeSpentSeconds)/3600,
 			worklog.Comment,
 		)
+		fmt.Fprint(out, "-----------------------------------------\n")
 	}
 
 	if cfg.DryRun {
