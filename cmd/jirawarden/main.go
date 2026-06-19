@@ -91,18 +91,9 @@ func run(
 	from string,
 	to string,
 ) error {
-	if from == "" || to == "" {
-		return fmt.Errorf("нужно указать -from и -to")
-	}
-
-	startDate, err := time.Parse(time.DateOnly, from)
+	startDate, endDate, err := parsePeriod(from, to)
 	if err != nil {
-		return fmt.Errorf("не удалось разобрать -from: %w", err)
-	}
-
-	endDate, err := time.Parse(time.DateOnly, to)
-	if err != nil {
-		return fmt.Errorf("не удалось разобрать -to: %w", err)
+		return err
 	}
 
 	cfg.IssuePatterns = issuePatterns
@@ -186,6 +177,30 @@ func newConfluenceCommand(ctx context.Context) *cobra.Command {
 	return cmd
 }
 
+func parsePeriod(from, to string) (time.Time, time.Time, error) {
+	today := time.Now().Truncate(24 * time.Hour)
+
+	startDate := today
+	if from != "" {
+		parsed, err := time.Parse(time.DateOnly, from)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("не удалось разобрать -from: %w", err)
+		}
+		startDate = parsed
+	}
+
+	endDate := today
+	if to != "" {
+		parsed, err := time.Parse(time.DateOnly, to)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("не удалось разобрать -to: %w", err)
+		}
+		endDate = parsed
+	}
+
+	return startDate, endDate, nil
+}
+
 func runConfluence(
 	ctx context.Context,
 	cfg warden.ConfluenceConfig,
@@ -193,18 +208,9 @@ func runConfluence(
 	from string,
 	to string,
 ) error {
-	if from == "" || to == "" {
-		return fmt.Errorf("нужно указать -from и -to")
-	}
-
-	startDate, err := time.Parse(time.DateOnly, from)
+	startDate, endDate, err := parsePeriod(from, to)
 	if err != nil {
-		return fmt.Errorf("не удалось разобрать -from: %w", err)
-	}
-
-	endDate, err := time.Parse(time.DateOnly, to)
-	if err != nil {
-		return fmt.Errorf("не удалось разобрать -to: %w", err)
+		return err
 	}
 
 	cfg.IssuePatterns = issuePatterns
