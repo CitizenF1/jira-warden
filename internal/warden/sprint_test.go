@@ -63,8 +63,8 @@ func TestFilterEligibleWorklogs(t *testing.T) {
 	if provider.calls != 3 {
 		t.Fatalf("expected three issue fetches, got %d", provider.calls)
 	}
-	expectedOutput := "пропуск PCS-456: задача назначена не на me@example.com\n" +
-		"пропуск PCS-789: задача не была в активном спринте на 2026-06-10\n"
+	expectedOutput := "🛑 пропуск PCS-456: задача назначена не на me@example.com\n" +
+		"🛑 пропуск PCS-789: задача не была в активном спринте на 2026-06-10\n"
 	if out.String() != expectedOutput {
 		t.Fatalf("unexpected output: %q", out.String())
 	}
