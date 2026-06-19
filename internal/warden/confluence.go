@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -43,12 +44,16 @@ type confluenceCandidate struct {
 
 // Pages возвращает активность пользователя в Confluence:
 //   - правки страниц и блогпостов (по истории версий — точные даты)
-//   - оставленные комментарии (дата создания комментария, заголовок родительской страницы)
-func (client *ConfluenceClient) Pages(ctx context.Context, contributor string, period Period) ([]ConfluencePage, error) {
-	candidates, baseURL, err := client.searchCandidates(ctx, contributor, period.From)
+//   - оставленные комментарии (дата создания, заголовок родительской страницы)
+//
+// out используется для вывода диагностических сообщений.
+func (client *ConfluenceClient) Pages(ctx context.Context, contributor string, period Period, out io.Writer) ([]ConfluencePage, error) {
+	candidates, baseURL, err := client.searchCandidates(ctx, contributor, period.From, out)
 	if err != nil {
 		return nil, err
 	}
+
+	_, _ = fmt.Fprintf(out, "найдено кандидатов Confluence: %d\n", len(candidates))
 
 	var pages []ConfluencePage
 	for _, candidate := range candidates {
@@ -71,7 +76,7 @@ func (client *ConfluenceClient) Pages(ctx context.Context, contributor string, p
 		}
 	}
 
-	comments, err := client.searchComments(ctx, contributor, period)
+	comments, err := client.searchComments(ctx, contributor, period, out)
 	if err != nil {
 		return nil, err
 	}
@@ -85,24 +90,20 @@ func (client *ConfluenceClient) Pages(ctx context.Context, contributor string, p
 	return pages, nil
 }
 
-// searchCandidates ищет страницы через CQL, в которых contributor участвовал
-// начиная с from. Верхняя граница отсутствует намеренно: страница может быть
-// отредактирована другим пользователем после окончания периода, при этом
-// правка нашего contributor в нужный период всё равно должна попасть в результат.
+// searchCandidates ищет страницы через CQL. Использует совместимый синтаксис:
+// (creator = "X" OR lastmodifier = "X") вместо contributor = "X",
+// (type = page OR type = blogpost) вместо type in (...).
+// Верхняя граница даты намеренно отсутствует: страница могла быть изменена
+// другим пользователем после окончания периода, но правка нашего contributor
+// в нужный период всё равно найдётся при обходе истории версий.
 func (client *ConfluenceClient) searchCandidates(
 	ctx context.Context,
 	contributor string,
 	from time.Time,
+	out io.Writer,
 ) ([]confluenceCandidate, string, error) {
-	contributorExpr := "contributor = currentUser()"
-	if contributor != "" {
-		contributorExpr = fmt.Sprintf(`contributor = "%s"`, contributor)
-	}
-	cql := fmt.Sprintf(
-		`%s AND type in (page, blogpost) AND lastModified >= "%s"`,
-		contributorExpr,
-		from.Format(time.DateOnly),
-	)
+	cql := client.candidatesCQL(contributor, from)
+	_, _ = fmt.Fprintf(out, "CQL (страницы): %s\n", cql)
 
 	var candidates []confluenceCandidate
 	var baseURL string
@@ -129,6 +130,18 @@ func (client *ConfluenceClient) searchCandidates(
 	}
 
 	return candidates, baseURL, nil
+}
+
+func (client *ConfluenceClient) candidatesCQL(contributor string, from time.Time) string {
+	dateFrom := from.Format(time.DateOnly)
+	typeExpr := `(type = page OR type = blogpost)`
+
+	if contributor == "" {
+		return fmt.Sprintf(`%s AND lastModified >= "%s"`, typeExpr, dateFrom)
+	}
+
+	authorExpr := fmt.Sprintf(`(creator = "%s" OR lastmodifier = "%s")`, contributor, contributor)
+	return fmt.Sprintf(`%s AND %s AND lastModified >= "%s"`, typeExpr, authorExpr, dateFrom)
 }
 
 func (client *ConfluenceClient) fetchCandidatesBatch(
@@ -327,23 +340,16 @@ func (client *ConfluenceClient) fetchVersionsBatch(
 }
 
 // searchComments ищет комментарии, созданные contributor в периоде.
-// Заголовок берётся из родительской страницы (container), чтобы извлекать
-// Jira-ключи из её названия. Дублирующиеся (день + страница) отбрасываются.
+// Заголовок берётся из родительской страницы (container).
+// Дублирующиеся (день + страница) отбрасываются.
 func (client *ConfluenceClient) searchComments(
 	ctx context.Context,
 	contributor string,
 	period Period,
+	out io.Writer,
 ) ([]ConfluencePage, error) {
-	creatorExpr := "creator = currentUser()"
-	if contributor != "" {
-		creatorExpr = fmt.Sprintf(`creator = "%s"`, contributor)
-	}
-	cql := fmt.Sprintf(
-		`type = comment AND %s AND created >= "%s" AND created <= "%s"`,
-		creatorExpr,
-		period.From.Format(time.DateOnly),
-		period.To.Format(time.DateOnly),
-	)
+	cql := client.commentsCQL(contributor, period)
+	_, _ = fmt.Fprintf(out, "CQL (комментарии): %s\n", cql)
 
 	seen := map[string]bool{}
 	var pages []ConfluencePage
@@ -374,7 +380,23 @@ func (client *ConfluenceClient) searchComments(
 		start += limit
 	}
 
+	_, _ = fmt.Fprintf(out, "найдено комментариев Confluence: %d\n", len(pages))
+
 	return pages, nil
+}
+
+func (client *ConfluenceClient) commentsCQL(contributor string, period Period) string {
+	dateFrom := period.From.Format(time.DateOnly)
+	dateTo := period.To.Format(time.DateOnly)
+
+	if contributor == "" {
+		return fmt.Sprintf(`type = comment AND created >= "%s" AND created <= "%s"`, dateFrom, dateTo)
+	}
+
+	return fmt.Sprintf(
+		`type = comment AND creator = "%s" AND created >= "%s" AND created <= "%s"`,
+		contributor, dateFrom, dateTo,
+	)
 }
 
 func (client *ConfluenceClient) fetchCommentsBatch(
@@ -471,16 +493,32 @@ func confluenceAuthorMatches(author confluenceVersionAuthor, contributor string)
 }
 
 func (client *ConfluenceClient) checkStatus(resp *http.Response) error {
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		return nil
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	detail := strings.TrimSpace(string(body))
+
+	// Попытка извлечь читаемое сообщение из JSON-ответа Confluence
+	var errBody struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &errBody) == nil && errBody.Message != "" {
+		detail = errBody.Message
+	}
+
 	if resp.StatusCode == http.StatusUnauthorized {
 		return fmt.Errorf(
-			"Confluence вернула %s; проверь CONFLUENCE_TOKEN, CONFLUENCE_EMAIL и --confluence-auth",
-			resp.Status,
+			"Confluence вернула %s; проверь CONFLUENCE_TOKEN, CONFLUENCE_EMAIL и --confluence-auth\n%s",
+			resp.Status, detail,
 		)
 	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("Confluence вернула %s", resp.Status)
+
+	if detail != "" {
+		return fmt.Errorf("Confluence вернула %s: %s", resp.Status, detail)
 	}
-	return nil
+	return fmt.Errorf("Confluence вернула %s", resp.Status)
 }
 
 func (client *ConfluenceClient) authorize(req *http.Request) {

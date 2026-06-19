@@ -12,7 +12,7 @@ func RunConfluence(ctx context.Context, cfg ConfluenceConfig, out io.Writer, in 
 	}
 
 	confluence := NewConfluenceClient(cfg.ConfluenceURL, cfg.ConfluenceEmail, cfg.ConfluenceToken, cfg.ConfluenceAuth)
-	pages, err := confluence.Pages(ctx, cfg.ConfluenceUser, cfg.Period)
+	pages, err := confluence.Pages(ctx, cfg.ConfluenceUser, cfg.Period, out)
 	if err != nil {
 		return err
 	}
