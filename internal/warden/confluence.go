@@ -3,6 +3,7 @@ package warden
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,18 +37,156 @@ func NewConfluenceClient(baseURL, email, token, auth string) *ConfluenceClient {
 	}
 }
 
-type confluenceCandidate struct {
-	ID    string
-	Title string
-	WebUI string
+func (client *ConfluenceClient) Pages(ctx context.Context, contributor string, period Period, out io.Writer) ([]ConfluencePage, error) {
+	pages, supported, err := client.fetchViaRSSFeed(ctx, contributor, period, out)
+	if err != nil {
+		return nil, err
+	}
+	if supported {
+		_, _ = fmt.Fprintf(out, "найдено активностей через RSS: %d\n", len(pages))
+		return pages, nil
+	}
+
+	_, _ = fmt.Fprintln(out, "RSS-фид недоступен, используем CQL поиск")
+	return client.fetchViaCQL(ctx, contributor, period, out)
 }
 
-// Pages возвращает активность пользователя в Confluence:
-//   - правки страниц и блогпостов (по истории версий — точные даты)
-//   - оставленные комментарии (дата создания, заголовок родительской страницы)
-//
-// out используется для вывода диагностических сообщений.
-func (client *ConfluenceClient) Pages(ctx context.Context, contributor string, period Period, out io.Writer) ([]ConfluencePage, error) {
+func (client *ConfluenceClient) fetchViaRSSFeed(
+	ctx context.Context,
+	contributor string,
+	period Period,
+	out io.Writer,
+) ([]ConfluencePage, bool, error) {
+	endpoint, err := url.JoinPath(client.baseURL, "createrssfeed.action")
+	if err != nil {
+		return nil, false, err
+	}
+
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, false, err
+	}
+
+	q := url.Values{}
+	q.Add("types", "page")
+	q.Add("types", "blogpost")
+	q.Add("types", "comment")
+	q.Set("spaces", "*")
+	q.Set("maxResults", "500")
+	q.Set("title", "warden")
+	if contributor != "" {
+		q.Set("authors", contributor)
+	}
+	u.RawQuery = q.Encode()
+
+	_, _ = fmt.Fprintf(out, "RSS feed: %s\n", u.String())
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, false, err
+	}
+	req.Header.Set("Accept", "application/rss+xml, application/xml, text/xml")
+	client.authorize(req)
+
+	resp, err := client.httpClient.Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("не удалось получить RSS feed Confluence: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, nil
+	}
+
+	if err := client.checkStatus(resp); err != nil {
+		return nil, true, err
+	}
+
+	pages, err := parseConfluenceRSSFeed(resp.Body, period)
+	if err != nil {
+		return nil, true, fmt.Errorf("не удалось разобрать RSS feed: %w", err)
+	}
+
+	return pages, true, nil
+}
+
+type rssItem struct {
+	Title   string `xml:"title"`
+	Link    string `xml:"link"`
+	GUID    string `xml:"guid"`
+	PubDate string `xml:"pubDate"`
+}
+
+type rssFeed struct {
+	Items []rssItem `xml:"channel>item"`
+}
+
+func parseConfluenceRSSFeed(r io.Reader, period Period) ([]ConfluencePage, error) {
+	dec := xml.NewDecoder(r)
+	dec.Strict = false
+	dec.AutoClose = xml.HTMLAutoClose
+	dec.Entity = xml.HTMLEntity
+
+	var feed rssFeed
+	if err := dec.Decode(&feed); err != nil {
+		return nil, err
+	}
+
+	var pages []ConfluencePage
+	for _, item := range feed.Items {
+		t, ok := parseRSSDate(item.PubDate)
+		if !ok {
+			continue
+		}
+		if t.Before(period.From) || t.After(endOfDay(period.To)) {
+			continue
+		}
+
+		title := strings.TrimSpace(item.Title)
+		if title == "" {
+			continue
+		}
+
+		pageURL := strings.TrimSpace(item.Link)
+		if pageURL == "" {
+			pageURL = strings.TrimSpace(item.GUID)
+		}
+
+		pages = append(pages, ConfluencePage{
+			Title: title,
+			URL:   pageURL,
+			Date:  t,
+		})
+	}
+
+	return pages, nil
+}
+
+func parseRSSDate(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	formats := []string{
+		time.RFC1123Z,
+		time.RFC1123,
+		"02 Jan 2006 15:04:05 -0700",
+		"02 Jan 2006 15:04:05 MST",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func (client *ConfluenceClient) fetchViaCQL(
+	ctx context.Context,
+	contributor string,
+	period Period,
+	out io.Writer,
+) ([]ConfluencePage, error) {
 	candidates, baseURL, err := client.searchCandidates(ctx, contributor, period.From, out)
 	if err != nil {
 		return nil, err
@@ -90,12 +229,12 @@ func (client *ConfluenceClient) Pages(ctx context.Context, contributor string, p
 	return pages, nil
 }
 
-// searchCandidates ищет страницы через CQL. Использует совместимый синтаксис:
-// (creator = "X" OR lastmodifier = "X") вместо contributor = "X",
-// (type = page OR type = blogpost) вместо type in (...).
-// Верхняя граница даты намеренно отсутствует: страница могла быть изменена
-// другим пользователем после окончания периода, но правка нашего contributor
-// в нужный период всё равно найдётся при обходе истории версий.
+type confluenceCandidate struct {
+	ID    string
+	Title string
+	WebUI string
+}
+
 func (client *ConfluenceClient) searchCandidates(
 	ctx context.Context,
 	contributor string,
@@ -339,8 +478,6 @@ func (client *ConfluenceClient) fetchVersionsBatch(
 }
 
 // searchComments ищет комментарии, созданные contributor в периоде.
-// Заголовок берётся из родительской страницы (container).
-// Дублирующиеся (день + страница) отбрасываются.
 func (client *ConfluenceClient) searchComments(
 	ctx context.Context,
 	contributor string,
@@ -499,7 +636,6 @@ func (client *ConfluenceClient) checkStatus(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
 	detail := strings.TrimSpace(string(body))
 
-	// Попытка извлечь читаемое сообщение из JSON-ответа Confluence
 	var errBody struct {
 		Message string `json:"message"`
 	}
