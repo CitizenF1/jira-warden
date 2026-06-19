@@ -69,7 +69,7 @@ func Run(ctx context.Context, cfg Config, out io.Writer, in io.Reader) error {
 	for _, worklog := range worklogs {
 		_, _ = fmt.Fprintf(
 			out,
-			"🕛StartedDate: %s 🔷IssueKey: %s ⌛TimeSpent: %.2fч 💬Comment: %s\n",
+			"🕛 StartedDate: %s 🔷 IssueKey: %s ⌛ TimeSpent: %.2fч 💬 Comment: %s\n",
 			worklog.StartedDate,
 			worklog.IssueKey,
 			float64(worklog.TimeSpentSeconds)/3600,
