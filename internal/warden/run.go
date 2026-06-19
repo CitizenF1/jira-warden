@@ -79,7 +79,7 @@ func Run(ctx context.Context, cfg Config, out io.Writer, in io.Reader) error {
 	}
 
 	if cfg.DryRun {
-		_, _ = fmt.Fprintln(out, "⛔ включен dry-run: Jira не была изменена")
+		_, _ = fmt.Fprintln(out, "⛔ включен dry-run: Jira worklog не были внесены")
 		return nil
 	}
 
