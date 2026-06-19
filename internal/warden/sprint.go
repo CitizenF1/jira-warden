@@ -28,23 +28,23 @@ func FilterEligibleWorklogs(
 			var err error
 			issue, err = provider.Issue(ctx, worklog.IssueKey)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("❌ не удалось получить задачу %q: %w", worklog.IssueKey, err)
 			}
 			issues[worklog.IssueKey] = issue
 		}
 
 		if !assigneeMatches(issue.Assignee, expectedAssignee) {
-			_, _ = fmt.Fprintf(out, "пропуск %s: задача назначена не на %s\n", worklog.IssueKey, expectedAssignee)
+			_, _ = fmt.Fprintf(out, "🛑 пропуск %s: задача назначена не на %s\n", worklog.IssueKey, expectedAssignee)
 			continue
 		}
 
 		workDate, err := time.Parse(time.DateOnly, worklog.StartedDate)
 		if err != nil {
-			return nil, fmt.Errorf("не удалось разобрать дату worklog %q: %w", worklog.StartedDate, err)
+			return nil, fmt.Errorf("🛑 не удалось разобрать дату worklog %q: %w", worklog.StartedDate, err)
 		}
 
 		if !hasSprintAt(issue.Sprints, workDate) {
-			_, _ = fmt.Fprintf(out, "пропуск %s: задача не была в активном спринте на %s\n", worklog.IssueKey, worklog.StartedDate)
+			_, _ = fmt.Fprintf(out, "🛑 пропуск %s: задача не была в активном спринте на %s\n", worklog.IssueKey, worklog.StartedDate)
 			continue
 		}
 

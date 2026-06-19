@@ -29,7 +29,7 @@ func Run(ctx context.Context, cfg Config, out io.Writer, in io.Reader) error {
 		return err
 	}
 
-	fmt.Fprintf(out, "найдено contributions: %d\n", len(contributions))
+	_, _ = fmt.Fprintf(out, "найдено contributions: %d\n", len(contributions))
 
 	worklogs := BuildWorklogs(
 		contributions,
@@ -38,7 +38,7 @@ func Run(ctx context.Context, cfg Config, out io.Writer, in io.Reader) error {
 		cfg.CommentPrefix,
 	)
 	if len(worklogs) == 0 {
-		_, _ = fmt.Fprintln(out, "нет worklog для создания")
+		_, _ = fmt.Fprintln(out, "❌ нет worklog для создания")
 		return nil
 	}
 
@@ -61,7 +61,7 @@ func Run(ctx context.Context, cfg Config, out io.Writer, in io.Reader) error {
 			return err
 		}
 		if len(worklogs) == 0 {
-			_, _ = fmt.Fprintln(out, "после фильтрации по спринту нет worklog для создания")
+			_, _ = fmt.Fprintln(out, "❌ после фильтрации по спринту нет worklog для создания")
 			return nil
 		}
 	}
@@ -69,17 +69,17 @@ func Run(ctx context.Context, cfg Config, out io.Writer, in io.Reader) error {
 	for _, worklog := range worklogs {
 		_, _ = fmt.Fprintf(
 			out,
-			"StartedDate: %s IssueKey: %s TimeSpent: %.2fч Comment: %s\n",
+			"🕛StartedDate: %s 🔷IssueKey: %s ⌛TimeSpent: %.2fч 💬Comment: %s\n",
 			worklog.StartedDate,
 			worklog.IssueKey,
 			float64(worklog.TimeSpentSeconds)/3600,
 			worklog.Comment,
 		)
-		fmt.Fprint(out, "-----------------------------------------\n")
+		_, _ = fmt.Fprintln(out, "-----------------------------------------")
 	}
 
 	if cfg.DryRun {
-		_, _ = fmt.Fprintln(out, "включен dry-run: Jira не была изменена")
+		_, _ = fmt.Fprintln(out, "⛔ включен dry-run: Jira не была изменена")
 		return nil
 	}
 
@@ -100,7 +100,7 @@ func Run(ctx context.Context, cfg Config, out io.Writer, in io.Reader) error {
 			return err
 		}
 		if !confirmed {
-			_, _ = fmt.Fprintln(out, "отменено: Jira не была изменена")
+			_, _ = fmt.Fprintln(out, "❌ отменено: Jira не была изменена")
 			return nil
 		}
 	}
@@ -111,7 +111,7 @@ func Run(ctx context.Context, cfg Config, out io.Writer, in io.Reader) error {
 		}
 	}
 
-	_, _ = fmt.Fprintln(out, "Jira worklog созданы")
+	_, _ = fmt.Fprintln(out, "✅ Jira worklog созданы")
 
 	return nil
 }
