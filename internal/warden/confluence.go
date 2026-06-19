@@ -41,9 +41,9 @@ type confluenceCandidate struct {
 	WebUI string
 }
 
-// Pages возвращает страницы Confluence с точными датами вклада.
-// Для каждой страницы обходит историю версий и возвращает одну запись
-// на каждый рабочий день, в который contributor вносил правки в периоде.
+// Pages возвращает активность пользователя в Confluence:
+//   - правки страниц и блогпостов (по истории версий — точные даты)
+//   - оставленные комментарии (дата создания комментария, заголовок родительской страницы)
 func (client *ConfluenceClient) Pages(ctx context.Context, contributor string, period Period) ([]ConfluencePage, error) {
 	candidates, baseURL, err := client.searchCandidates(ctx, contributor, period.From)
 	if err != nil {
@@ -70,6 +70,17 @@ func (client *ConfluenceClient) Pages(ctx context.Context, contributor string, p
 			})
 		}
 	}
+
+	comments, err := client.searchComments(ctx, contributor, period)
+	if err != nil {
+		return nil, err
+	}
+	for i := range comments {
+		if !strings.HasPrefix(comments[i].URL, "http") {
+			comments[i].URL = baseURL + comments[i].URL
+		}
+	}
+	pages = append(pages, comments...)
 
 	return pages, nil
 }
@@ -313,6 +324,134 @@ func (client *ConfluenceClient) fetchVersionsBatch(
 	}
 
 	return versions, body.Links.Next != "", nil
+}
+
+// searchComments ищет комментарии, созданные contributor в периоде.
+// Заголовок берётся из родительской страницы (container), чтобы извлекать
+// Jira-ключи из её названия. Дублирующиеся (день + страница) отбрасываются.
+func (client *ConfluenceClient) searchComments(
+	ctx context.Context,
+	contributor string,
+	period Period,
+) ([]ConfluencePage, error) {
+	creatorExpr := "creator = currentUser()"
+	if contributor != "" {
+		creatorExpr = fmt.Sprintf(`creator = "%s"`, contributor)
+	}
+	cql := fmt.Sprintf(
+		`type = comment AND %s AND created >= "%s" AND created <= "%s"`,
+		creatorExpr,
+		period.From.Format(time.DateOnly),
+		period.To.Format(time.DateOnly),
+	)
+
+	seen := map[string]bool{}
+	var pages []ConfluencePage
+	start := 0
+	const limit = 50
+
+	for {
+		batch, hasNext, err := client.fetchCommentsBatch(ctx, cql, start, limit)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, c := range batch {
+			if c.Date.IsZero() || c.Title == "" {
+				continue
+			}
+			key := c.Date.Format(time.DateOnly) + "\x00" + c.URL
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			pages = append(pages, c)
+		}
+
+		if !hasNext || len(batch) == 0 {
+			break
+		}
+		start += limit
+	}
+
+	return pages, nil
+}
+
+func (client *ConfluenceClient) fetchCommentsBatch(
+	ctx context.Context,
+	cql string,
+	start int,
+	limit int,
+) ([]ConfluencePage, bool, error) {
+	endpoint, err := url.JoinPath(client.baseURL, "rest/api/content/search")
+	if err != nil {
+		return nil, false, fmt.Errorf("не удалось собрать URL комментариев Confluence: %w", err)
+	}
+
+	requestURL, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, false, fmt.Errorf("не удалось разобрать URL комментариев Confluence: %w", err)
+	}
+
+	query := requestURL.Query()
+	query.Set("cql", cql)
+	query.Set("start", strconv.Itoa(start))
+	query.Set("limit", strconv.Itoa(limit))
+	query.Set("expand", "version,container,container._links")
+	requestURL.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("не удалось создать запрос комментариев Confluence: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	client.authorize(req)
+
+	resp, err := client.httpClient.Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("не удалось получить комментарии из Confluence: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := client.checkStatus(resp); err != nil {
+		return nil, false, err
+	}
+
+	var body struct {
+		Results []struct {
+			Version struct {
+				When string `json:"when"`
+			} `json:"version"`
+			Container struct {
+				Title string `json:"title"`
+				Links struct {
+					WebUI string `json:"webui"`
+				} `json:"_links"`
+			} `json:"container"`
+		} `json:"results"`
+		Links struct {
+			Next string `json:"next"`
+		} `json:"_links"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, false, fmt.Errorf("не удалось декодировать комментарии Confluence: %w", err)
+	}
+
+	pages := make([]ConfluencePage, 0, len(body.Results))
+	for _, result := range body.Results {
+		when, ok := parseJiraTime(result.Version.When)
+		if !ok {
+			continue
+		}
+		pages = append(pages, ConfluencePage{
+			Title: result.Container.Title,
+			URL:   result.Container.Links.WebUI,
+			Date:  when,
+		})
+	}
+
+	return pages, body.Links.Next != "", nil
 }
 
 func confluenceAuthorMatches(author confluenceVersionAuthor, contributor string) bool {
