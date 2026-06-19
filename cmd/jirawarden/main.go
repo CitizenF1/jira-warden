@@ -25,6 +25,8 @@ var defaultIssuePatterns = []string{
 }
 
 func main() {
+	loadDotEnv(".env")
+
 	cmd := newRootCommand(context.Background())
 	cmd.SetArgs(normalizeLegacyFlags(os.Args[1:]))
 
@@ -54,6 +56,8 @@ func newRootCommand(ctx context.Context) *cobra.Command {
 			return run(ctx, cfg, issuePatterns.values(), from, to)
 		},
 	}
+
+	cmd.AddCommand(newConfluenceCommand(ctx))
 
 	flags := cmd.Flags()
 	flags.StringVar(&cfg.GitLabURL, "gitlab-url", getenv("GITLAB_URL", ""), "базовый URL GitLab")
@@ -140,6 +144,108 @@ func (flag issuePatternFlag) values() []string {
 	}
 
 	return patterns
+}
+
+func newConfluenceCommand(ctx context.Context) *cobra.Command {
+	var cfg warden.ConfluenceConfig
+	var from, to string
+	issuePatterns := issuePatternFlag(defaultIssuePatterns)
+
+	cmd := &cobra.Command{
+		Use:           "confluence",
+		Short:         "Создает Jira worklog по активности в Confluence",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runConfluence(ctx, cfg, issuePatterns.values(), from, to)
+		},
+	}
+
+	flags := cmd.Flags()
+	flags.StringVar(&cfg.ConfluenceURL, "confluence-url", getenv("CONFLUENCE_URL", ""), "базовый URL Confluence")
+	flags.StringVar(&cfg.ConfluenceToken, "confluence-token", getenv("CONFLUENCE_TOKEN", ""), "API token Confluence")
+	flags.StringVar(&cfg.ConfluenceEmail, "confluence-email", getenv("CONFLUENCE_EMAIL", ""), "email для basic-авторизации Confluence")
+	flags.StringVar(&cfg.ConfluenceAuth, "confluence-auth", getenv("CONFLUENCE_AUTH", "auto"), "режим авторизации Confluence: auto, basic или bearer")
+	flags.StringVar(&cfg.ConfluenceUser, "confluence-user", getenv("CONFLUENCE_USER", ""), "пользователь Confluence для CQL (username, email или accountId; пусто = currentUser())")
+	flags.StringVar(&cfg.JiraURL, "jira-url", getenv("JIRA_URL", ""), "базовый URL Jira")
+	flags.StringVar(&cfg.JiraEmail, "jira-email", getenv("JIRA_EMAIL", ""), "email пользователя Jira")
+	flags.StringVar(&cfg.JiraToken, "jira-token", getenv("JIRA_TOKEN", ""), "API token Jira")
+	flags.StringVar(&cfg.JiraAuth, "jira-auth", getenv("JIRA_AUTH", "auto"), "режим авторизации Jira: auto, basic или bearer")
+	flags.StringVar(&cfg.JiraSprintField, "jira-sprint-field", getenv("JIRA_SPRINT_FIELD", "auto"), "custom field спринта Jira или auto")
+	flags.StringVar(&cfg.JiraAssignee, "jira-assignee", getenv("JIRA_ASSIGNEE", getenv("JIRA_EMAIL", "")), "ожидаемый исполнитель Jira: accountId, name, email или display name")
+	flags.Var(&issuePatterns, "issue-pattern", "дополнительная regexp с одной группой Jira key; можно повторять")
+	flags.StringVar(&cfg.CommentPrefix, "comment-prefix", "Confluence", "префикс комментария Jira worklog")
+	flags.Float64Var(&cfg.HoursPerDay, "hours-per-day", 8, "сколько часов распределять на рабочий день")
+	flags.Float64Var(&cfg.MaxHoursPerDay, "max-hours-per-day", 8, "максимальный суммарный Jira worklog за день")
+	flags.BoolVar(&cfg.RequireSprint, "require-sprint", true, "пропускать Jira задачи вне активного спринта")
+	flags.BoolVar(&cfg.AssumeYes, "yes", false, "создавать Jira worklog без интерактивного подтверждения")
+	flags.BoolVar(&cfg.DryRun, "dry-run", true, "показать worklog без отправки в Jira")
+	flags.StringVar(&from, "from", "", "дата начала, YYYY-MM-DD")
+	flags.StringVar(&to, "to", "", "дата окончания, YYYY-MM-DD")
+
+	return cmd
+}
+
+func runConfluence(
+	ctx context.Context,
+	cfg warden.ConfluenceConfig,
+	issuePatterns []string,
+	from string,
+	to string,
+) error {
+	if from == "" || to == "" {
+		return fmt.Errorf("нужно указать -from и -to")
+	}
+
+	startDate, err := time.Parse(time.DateOnly, from)
+	if err != nil {
+		return fmt.Errorf("не удалось разобрать -from: %w", err)
+	}
+
+	endDate, err := time.Parse(time.DateOnly, to)
+	if err != nil {
+		return fmt.Errorf("не удалось разобрать -to: %w", err)
+	}
+
+	cfg.IssuePatterns = issuePatterns
+	cfg.Period = warden.Period{
+		From: startDate,
+		To:   endDate,
+	}
+
+	return warden.RunConfluence(ctx, cfg, os.Stdout, os.Stdin)
+}
+
+func loadDotEnv(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+
+		if comment := strings.Index(value, " #"); comment >= 0 {
+			value = strings.TrimSpace(value[:comment])
+		}
+
+		value = strings.Trim(value, `"'`)
+
+		if key != "" && os.Getenv(key) == "" {
+			_ = os.Setenv(key, value)
+		}
+	}
 }
 
 func getenv(key string, fallback string) string {

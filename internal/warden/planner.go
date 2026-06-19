@@ -113,6 +113,32 @@ func normalizeIssueKey(value string) string {
 	return replacer.Replace(value)
 }
 
+func ExtractContributionsFromPages(pages []ConfluencePage, patterns []string) ([]Contribution, error) {
+	matchers, err := compileIssuePatterns(patterns)
+	if err != nil {
+		return nil, err
+	}
+
+	contributions := make([]Contribution, 0, len(pages))
+	for _, page := range pages {
+		issueKeys := findIssueKeys(page.Title, matchers)
+		if len(issueKeys) == 0 {
+			continue
+		}
+
+		for _, issueKey := range issueKeys {
+			contributions = append(contributions, Contribution{
+				IssueKey: issueKey,
+				Title:    page.Title,
+				URL:      page.URL,
+				Date:     page.Date,
+			})
+		}
+	}
+
+	return contributions, nil
+}
+
 func BuildWorklogs(
 	contributions []Contribution,
 	period Period,
