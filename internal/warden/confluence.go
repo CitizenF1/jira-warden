@@ -140,8 +140,7 @@ func (client *ConfluenceClient) candidatesCQL(contributor string, from time.Time
 		return fmt.Sprintf(`%s AND lastModified >= "%s"`, typeExpr, dateFrom)
 	}
 
-	authorExpr := fmt.Sprintf(`(creator = "%s" OR lastmodifier = "%s")`, contributor, contributor)
-	return fmt.Sprintf(`%s AND %s AND lastModified >= "%s"`, typeExpr, authorExpr, dateFrom)
+	return fmt.Sprintf(`%s AND contributor = "%s" AND lastModified >= "%s"`, typeExpr, contributor, dateFrom)
 }
 
 func (client *ConfluenceClient) fetchCandidatesBatch(
